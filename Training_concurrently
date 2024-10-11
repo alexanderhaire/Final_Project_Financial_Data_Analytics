@@ -9,8 +9,8 @@ from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 import warnings
 
 # Alpaca API credentials
-API_KEY = 'API Key'
-API_SECRET = 'Secret'
+API_KEY = 'PK753KPEQ2WUPJWJRSGD'
+API_SECRET = '7vVGcSCohZT9ljTks7Jh1zny5mVeMjRrD7duLirU'
 BASE_URL = 'https://paper-api.alpaca.markets'
 
 # Suppress warnings
@@ -100,8 +100,6 @@ def get_latest_data(ticker, timeframe='1Min'):
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs))
-        else:
-            print("Required columns are missing.")
         
         df.dropna(inplace=True)
         return df
@@ -124,12 +122,13 @@ def place_order(symbol, qty, side, order_type='market'):
     except Exception as e:
         print(f"Error placing order: {e}")
 
-# Function to run the strategy with machine learning predictions for multiple tickers
-def run_ml_strategy(tickers, quantity, model, scaler):
+# Function to run the HFT strategy
+def run_hft_strategy(tickers, quantity, model_dict, scaler_dict):
     for ticker in tickers:
+        print(f"Running HFT strategy for {ticker}...")
         df = get_latest_data(ticker)
         if df.empty:
-            print(f"No data available for trading {ticker}.")
+            print(f"No data available for {ticker}.")
             continue
         
         lag_1 = df['Close'].shift(1).iloc[-1]
@@ -141,31 +140,50 @@ def run_ml_strategy(tickers, quantity, model, scaler):
 
         # Prepare the input for the model
         X_new = np.array([[lag_1, lag_2, ma_50, ma_200, rsi, current_price]])
-        X_new_scaled = scaler.transform(X_new)
+        X_new_scaled = scaler_dict[ticker].transform(X_new)
 
-        prediction = model.predict(X_new_scaled)
-        
+        prediction = model_dict[ticker].predict(X_new_scaled)
+
         try:
             position = api.get_position(ticker)
             current_qty = int(position.qty)
         except Exception:
             current_qty = 0
 
-        if prediction == 1 and current_qty == 0:
+        # Always make a trade based on the prediction
+        if prediction == 1:
             place_order(ticker, quantity, 'buy')
-        elif prediction == 0 and current_qty > 0:
-            place_order(ticker, current_qty, 'sell')
+            # Immediately place a sell order for the same amount after buying
+            time.sleep(0.5)  # Adjust the sleep time for your preference
+            place_order(ticker, quantity, 'sell')
+        elif prediction == 0:
+            if current_qty > 0:
+                place_order(ticker, current_qty, 'sell')
+            # Immediately place a buy order for the same amount after selling
+            time.sleep(0.5)
+            place_order(ticker, quantity, 'buy')
 
 # Main execution
-tickers = ["AAPL", "GOOGL", "MSFT"]  # Add as many tickers as needed
-model, scaler = train_model(tickers)
+tickers = ["AAPL", "GOOGL", "MSFT"]
+model_dict = {}
+scaler_dict = {}
 
+# Train models for each ticker
+for ticker in tickers:
+    print(f"Training model for {ticker}...")
+    historical_data = get_historical_data(ticker)
+    model, scaler = train_model([ticker])
+    model_dict[ticker] = model
+    scaler_dict[ticker] = scaler
+
+# Run the HFT strategy
 while True:
     try:
-        run_ml_strategy(tickers, 10, model, scaler)
+        run_hft_strategy(tickers, 10, model_dict, scaler_dict)
         account = api.get_account()
         print(f"Portfolio Value: {account.portfolio_value}")
-        time.sleep(60)
+        time.sleep(1)  # Adjust the sleep time for HFT
     except Exception as e:
         print(f"Error: {e}")
-        break
+        
+
