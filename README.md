@@ -2,7 +2,7 @@
 
 # Stock Trading Bot Using XGBoost and Alpaca API
 
-This project implements an automated stock trading bot using machine learning models (XGBoost) and the Alpaca API. The bot is designed to make trading decisions based on stock market data, leveraging various technical indicators and time series analysis.
+This project implements an automated stock trading bot using machine learning models (XGBoost) and the Alpaca API. The bot is designed to make trading decisions based on stock market data, leveraging various technical indicators and time series analysis. This is just for the basic AAPL file!!
 
 ## Features
 - Utilizes the Alpaca API to execute real-time trades.
