@@ -9,8 +9,8 @@ from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 import warnings
 
 # Alpaca API credentials
-API_KEY = 'API Key'
-API_SECRET = 'API Secret'
+API_KEY = 'Your API'
+API_SECRET = 'Your Secret API'
 BASE_URL = 'https://paper-api.alpaca.markets'
 
 # Suppress warnings
@@ -87,17 +87,19 @@ def get_latest_data(ticker, timeframe='1Min'):
         print(f"Error retrieving data: {e}")
         return pd.DataFrame()
 
-# Function to place an order
-def place_order(symbol, qty, side, order_type='market'):
+# Function to place a limit order
+def place_limit_order(symbol, qty, side, limit_price):
     try:
+        limit_price = round(limit_price, 2)  # Round limit price to 2 decimal places
         api.submit_order(
             symbol=symbol,
             qty=qty,
             side=side,
-            type=order_type,
-            time_in_force='gtc'
+            type='limit',
+            time_in_force='gtc',
+            limit_price=str(limit_price)
         )
-        print(f"Order placed: {side} {qty} shares of {symbol}")
+        print(f"Limit order placed: {side} {qty} shares of {symbol} at {limit_price}")
     except Exception as e:
         print(f"Error placing order: {e}")
 
@@ -183,14 +185,20 @@ def run_hft_strategy(tickers, quantity, model_dict, scaler_dict, retrain_interva
             except Exception:
                 current_qty = 0
 
+            # Get the current price for placing limit orders
+            current_price = df['Close'].iloc[-1]
+
             # Sell if quantity exceeds 200 or model predicts a decrease
-            if current_qty > 50 or prediction == 0:
-                print(f"Selling all shares of {ticker} due to {'excess quantity' if current_qty > 200 else 'price decrease prediction'}.")
-                place_order(ticker, current_qty, 'sell')
+            if current_qty > 300 or prediction == 0:
+                limit_price = round(current_price * 0.99, 2)  # 1% below the current price
+                print(f"Placing limit sell order for {ticker}.")
+                place_limit_order(ticker, current_qty, 'sell', limit_price)
             else:
                 # Buy if the model predicts an increase
                 if prediction == 1:
-                    place_order(ticker, quantity, 'buy')
+                    limit_price = round(current_price * 1.01, 2)  # 1% above the current price
+                    print(f"Placing limit buy order for {ticker}.")
+                    place_limit_order(ticker, quantity, 'buy', limit_price)
 
         # Ensure retrain_interval is not zero, and handle the periodic retraining
         if retrain_interval > 0 and iteration_count % (retrain_interval // 60) == 0:
@@ -217,4 +225,4 @@ for ticker in tickers:
     scaler_dict[ticker] = scaler
 
 # Run the HFT strategy with periodic retraining
-run_hft_strategy(tickers, 1, model_dict, scaler_dict, retrain_interval=60)  # Retrain every minute
+run_hft_strategy(tickers, 1, model_dict, scaler_dict, retrain_interval=60) 
