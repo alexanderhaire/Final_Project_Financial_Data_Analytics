@@ -1,0 +1,252 @@
+import alpaca_trade_api as tradeapi  # Ensure this line is included
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import time
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM, Dropout
+from xgboost import XGBClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
+import warnings
+from joblib import Parallel, delayed
+
+# Alpaca API credentials
+API_KEY = 'API Key'
+API_SECRET = 'API Secret'
+BASE_URL = 'https://paper-api.alpaca.markets'
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
+
+# Feature Engineering: Add additional technical indicators
+def add_technical_indicators(data):
+    # Ensure the index is of type DateTimeIndex
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.to_datetime(data.index)
+
+    # Bollinger Bands
+    data['Bollinger_Upper'] = data['Close'].rolling(window=20).mean() + (data['Close'].rolling(window=20).std() * 2)
+    data['Bollinger_Lower'] = data['Close'].rolling(window=20).mean() - (data['Close'].rolling(window=20).std() * 2)
+    
+    # MACD (Moving Average Convergence Divergence)
+    data['MACD'] = data['Close'].ewm(span=12, adjust=False).mean() - data['Close'].ewm(span=26, adjust=False).mean()
+    
+    # On-Balance Volume (OBV)
+    data['OBV'] = (np.sign(data['Close'].diff()) * data['Volume']).fillna(0).cumsum()
+
+    # Average True Range (ATR)
+    data['ATR'] = (data['High'] - data['Low']).rolling(window=14).mean()
+
+    # Seasonal features
+    data['Day_of_Week'] = data.index.dayofweek
+    data['Month'] = data.index.month
+    data['Quarter'] = data.index.quarter
+    
+    return data
+
+
+# Function to get historical data and preprocess it
+def get_historical_data(ticker, start_date="2010-01-01", end_date="2024-01-01"):
+    try:
+        data = yf.download(ticker, start=start_date, end=end_date)
+        if data.empty:
+            print(f"No historical data found for {ticker}. Skipping.")
+            return pd.DataFrame()
+        data['50_MA'] = data['Close'].rolling(window=50).mean()
+        data['200_MA'] = data['Close'].rolling(window=200).mean()
+        delta = data['Close'].diff(1)
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        data['RSI'] = 100 - (100 / (1 + rs))
+        data['Momentum'] = data['Close'] - data['Close'].shift(10)
+        data['Lag_1'] = data['Close'].shift(1)
+        data['Lag_2'] = data['Close'].shift(2)
+        data = add_technical_indicators(data)
+        data.dropna(inplace=True)
+        return data
+    except Exception as e:
+        print(f"Error retrieving historical data for {ticker}: {e}")
+        return pd.DataFrame()
+
+# Function to create LSTM model for deep learning
+def create_lstm_model(input_shape):
+    model = Sequential()
+    model.add(LSTM(100, input_shape=input_shape, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(50, return_sequences=False))
+    model.add(Dropout(0.2))
+    model.add(Dense(25))
+    model.add(Dense(1, activation='sigmoid'))
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+# Function to train hybrid model with LSTM and XGBoost
+def train_hybrid_model(ticker):
+    data = get_historical_data(ticker)
+    if data.empty:
+        return None, None, None
+    data['Target'] = np.where(data['Close'].shift(-1) > data['Close'], 1, 0)
+    features = ['Lag_1', 'Lag_2', '50_MA', '200_MA', 'RSI', 'Momentum', 'Bollinger_Upper', 'Bollinger_Lower', 'MACD', 'OBV', 'ATR']
+    
+    X = data[features]
+    y = data['Target']
+
+    if X.empty:
+        print(f"No features available for {ticker}. Skipping.")
+        return None, None, None
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_lstm = X_scaled.reshape((X_scaled.shape[0], X_scaled.shape[1], 1))
+
+    lstm_model = create_lstm_model((X_lstm.shape[1], 1))
+    lstm_model.fit(X_lstm, y, epochs=10, batch_size=64, verbose=0)
+
+    xgb_model = XGBClassifier(eval_metric='logloss')
+    xgb_model.fit(X_scaled, y)
+    
+    return lstm_model, xgb_model, scaler
+
+# Function to place a limit order
+def place_limit_order(symbol, qty, side, limit_price):
+    if qty == 0:
+        print(f"Error placing order: qty must be != 0. Received qty: {qty}")
+        return
+    try:
+        api.submit_order(
+            symbol=symbol,
+            qty=abs(qty),
+            side=side,
+            type='limit',
+            limit_price=str(limit_price),
+            time_in_force='gtc'
+        )
+        print(f"Limit order placed: {side} {abs(qty)} shares of {symbol} at {limit_price}")
+    except Exception as e:
+        print(f"Error placing order: {e}")
+
+# Function to get real-time data from Alpaca and preprocess it
+def get_latest_data(ticker, timeframe='1Min', retries=3):
+    try:
+        clock = api.get_clock()
+        if not clock.is_open:
+            print("Market is currently closed.")
+            return pd.DataFrame()
+
+        for attempt in range(retries):
+            bars = api.get_bars(ticker, timeframe=timeframe, limit=200).df
+            if not bars.empty:
+                df = pd.DataFrame(bars.reset_index())
+                df.rename(columns={'close': 'Close', 'high': 'High', 'low': 'Low', 'open': 'Open', 'volume': 'Volume'}, inplace=True)
+                df['50_MA'] = df['Close'].rolling(window=50).mean()
+                df['200_MA'] = df['Close'].rolling(window=200).mean()
+                df['Momentum'] = df['Close'] - df['Close'].shift(10)
+                delta = df['Close'].diff(1)
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                df['RSI'] = 100 - (100 / (1 + rs))
+                df['Lag_1'] = df['Close'].shift(1)
+                df['Lag_2'] = df['Close'].shift(2)
+                df = add_technical_indicators(df)
+                df.dropna(inplace=True)
+                return df
+            else:
+                print(f"No data returned for {ticker}, retrying... (Attempt {attempt+1})")
+                time.sleep(min(5 * (attempt + 1), 60))
+
+        print(f"Failed to retrieve data for {ticker} after {retries} attempts.")
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"Error retrieving data: {e}")
+        return pd.DataFrame()
+
+# Function to run trading strategy with periodic retraining
+def run_hybrid_strategy(tickers, quantity, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=3600):
+    iteration_count = 0
+
+    def process_ticker(ticker):
+        print(f"Running trading strategy for {ticker}...")
+        df = get_latest_data(ticker)
+        if df.empty:
+            print(f"No data available for {ticker}.")
+            return
+
+        try:
+            features = ['Lag_1', 'Lag_2', '50_MA', '200_MA', 'RSI', 'Momentum', 'Bollinger_Upper', 'Bollinger_Lower', 'MACD', 'OBV', 'ATR']
+            X_new = df[features]
+            current_price = df['Close'].iloc[-1]
+        except KeyError as e:
+            print(f"Error: {e}")
+            return
+
+        X_new_scaled = scaler_dict[ticker].transform(X_new.tail(1))
+        X_lstm_new = X_new_scaled.reshape((X_new_scaled.shape[0], X_new_scaled.shape[1], 1))
+
+        lstm_prediction = lstm_model_dict[ticker].predict(X_lstm_new)
+        xgb_prediction = xgb_model_dict[ticker].predict(X_new_scaled)
+
+        final_prediction = (lstm_prediction[0] + xgb_prediction[0]) / 2
+        decision = 1 if final_prediction > 0.5 else 0
+
+        try:
+            position = api.get_position(ticker)
+            current_qty = int(position.qty)
+            side = 'short' if current_qty < 0 else 'long'
+        except Exception:
+            current_qty = 0
+            side = None
+
+        if side == 'short' and decision == 1:
+            limit_price = round(current_price * 1.001, 2)
+            place_limit_order(ticker, abs(current_qty), 'buy', limit_price)
+            return
+
+        if side == 'long' and decision == 0:
+            limit_price = round(current_price * 0.999, 2)
+            place_limit_order(ticker, abs(current_qty), 'sell', limit_price)
+            return
+
+        if decision == 1:
+            limit_price = round(current_price * 1.001, 2)
+            place_limit_order(ticker, quantity, 'buy', limit_price)
+        elif decision == 0:
+            limit_price = round(current_price * 0.999, 2)
+            place_limit_order(ticker, quantity, 'sell', limit_price)
+
+    while True:
+        Parallel(n_jobs=-1)(delayed(process_ticker)(ticker) for ticker in tickers)
+
+        if retrain_interval > 0 and iteration_count % (retrain_interval // 60) == 0:
+            print("Retraining models...")
+            for ticker in tickers:
+                lstm_model, xgb_model, scaler = train_hybrid_model(ticker)
+                if lstm_model and xgb_model and scaler:
+                    lstm_model_dict[ticker] = lstm_model
+                    xgb_model_dict[ticker] = xgb_model
+                    scaler_dict[ticker] = scaler
+
+        account = api.get_account()
+        print(f"Portfolio Value: {account.portfolio_value}")
+        time.sleep(60)
+        iteration_count += 1
+
+# Main execution
+tickers = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"]
+lstm_model_dict = {}
+xgb_model_dict = {}
+scaler_dict = {}
+
+for ticker in tickers:
+    lstm_model, xgb_model, scaler = train_hybrid_model(ticker)
+    if lstm_model and xgb_model and scaler:
+        lstm_model_dict[ticker] = lstm_model
+        xgb_model_dict[ticker] = xgb_model
+        scaler_dict[ticker] = scaler
+
+# Run the hybrid strategy with retraining every hour (3600 seconds)
+run_hybrid_strategy(tickers, 1, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=60)
