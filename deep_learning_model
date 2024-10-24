@@ -1,4 +1,4 @@
-import alpaca_trade_api as tradeapi  # Ensure this line is included
+import alpaca_trade_api as tradeapi
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -8,13 +8,12 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, LSTM, Dropout
 from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit
 import warnings
 from joblib import Parallel, delayed
 
 # Alpaca API credentials
-API_KEY = 'API Key'
-API_SECRET = 'API Secret'
+API_KEY = 'PKCFQ4Q1E1DUS1PFIACN'
+API_SECRET = 'pBu2gkTSl4LzrGb1ds1Vr3h5rbLPliWxQKbeaK6j'
 BASE_URL = 'https://paper-api.alpaca.markets'
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -23,30 +22,28 @@ api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
 
 # Feature Engineering: Add additional technical indicators
 def add_technical_indicators(data):
-    # Ensure the index is of type DateTimeIndex
     if not isinstance(data.index, pd.DatetimeIndex):
         data.index = pd.to_datetime(data.index)
 
     # Bollinger Bands
     data['Bollinger_Upper'] = data['Close'].rolling(window=20).mean() + (data['Close'].rolling(window=20).std() * 2)
     data['Bollinger_Lower'] = data['Close'].rolling(window=20).mean() - (data['Close'].rolling(window=20).std() * 2)
-    
-    # MACD (Moving Average Convergence Divergence)
+
+    # MACD
     data['MACD'] = data['Close'].ewm(span=12, adjust=False).mean() - data['Close'].ewm(span=26, adjust=False).mean()
-    
-    # On-Balance Volume (OBV)
+
+    # OBV
     data['OBV'] = (np.sign(data['Close'].diff()) * data['Volume']).fillna(0).cumsum()
 
-    # Average True Range (ATR)
+    # ATR
     data['ATR'] = (data['High'] - data['Low']).rolling(window=14).mean()
 
     # Seasonal features
     data['Day_of_Week'] = data.index.dayofweek
     data['Month'] = data.index.month
     data['Quarter'] = data.index.quarter
-    
-    return data
 
+    return data
 
 # Function to get historical data and preprocess it
 def get_historical_data(ticker, start_date="2010-01-01", end_date="2024-01-01"):
@@ -72,7 +69,7 @@ def get_historical_data(ticker, start_date="2010-01-01", end_date="2024-01-01"):
         print(f"Error retrieving historical data for {ticker}: {e}")
         return pd.DataFrame()
 
-# Function to create LSTM model for deep learning
+# Function to create LSTM model
 def create_lstm_model(input_shape):
     model = Sequential()
     model.add(LSTM(100, input_shape=input_shape, return_sequences=True))
@@ -84,14 +81,18 @@ def create_lstm_model(input_shape):
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
     return model
 
-# Function to train hybrid model with LSTM and XGBoost
+# Function for LSTM prediction
+def predict_lstm(model, X_lstm_new):
+    return model.predict(X_lstm_new)
+
+# Function to train hybrid model
 def train_hybrid_model(ticker):
     data = get_historical_data(ticker)
     if data.empty:
         return None, None, None
     data['Target'] = np.where(data['Close'].shift(-1) > data['Close'], 1, 0)
     features = ['Lag_1', 'Lag_2', '50_MA', '200_MA', 'RSI', 'Momentum', 'Bollinger_Upper', 'Bollinger_Lower', 'MACD', 'OBV', 'ATR']
-    
+
     X = data[features]
     y = data['Target']
 
@@ -108,7 +109,7 @@ def train_hybrid_model(ticker):
 
     xgb_model = XGBClassifier(eval_metric='logloss')
     xgb_model.fit(X_scaled, y)
-    
+
     return lstm_model, xgb_model, scaler
 
 # Function to place a limit order
@@ -129,7 +130,7 @@ def place_limit_order(symbol, qty, side, limit_price):
     except Exception as e:
         print(f"Error placing order: {e}")
 
-# Function to get real-time data from Alpaca and preprocess it
+# Function to get real-time data
 def get_latest_data(ticker, timeframe='1Min', retries=3):
     try:
         clock = api.get_clock()
@@ -165,6 +166,18 @@ def get_latest_data(ticker, timeframe='1Min', retries=3):
         print(f"Error retrieving data: {e}")
         return pd.DataFrame()
 
+# Function to calculate total PnL
+def calculate_total_pnl():
+    positions = api.list_positions()  # Get current open positions
+    total_pnl = 0.0
+    for position in positions:
+        current_price = float(position.current_price)
+        avg_entry_price = float(position.avg_entry_price)
+        qty = float(position.qty)
+        pnl = (current_price - avg_entry_price) * qty  # Calculate PnL for each position
+        total_pnl += pnl
+    return total_pnl
+
 # Function to run trading strategy with periodic retraining
 def run_hybrid_strategy(tickers, quantity, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=3600):
     iteration_count = 0
@@ -184,14 +197,17 @@ def run_hybrid_strategy(tickers, quantity, lstm_model_dict, xgb_model_dict, scal
             print(f"Error: {e}")
             return
 
-        X_new_scaled = scaler_dict[ticker].transform(X_new.tail(1))
+        # Remove feature names before transforming
+        X_new_scaled = scaler_dict[ticker].transform(X_new.tail(1).values)
         X_lstm_new = X_new_scaled.reshape((X_new_scaled.shape[0], X_new_scaled.shape[1], 1))
 
-        lstm_prediction = lstm_model_dict[ticker].predict(X_lstm_new)
+        lstm_prediction = predict_lstm(lstm_model_dict[ticker], X_lstm_new)  # Call predict_lstm here
         xgb_prediction = xgb_model_dict[ticker].predict(X_new_scaled)
 
         final_prediction = (lstm_prediction[0] + xgb_prediction[0]) / 2
         decision = 1 if final_prediction > 0.5 else 0
+
+        print(f"{ticker} Predictions - LSTM: {lstm_prediction[0]}, XGBoost: {xgb_prediction[0]}, Final Decision: {decision}")
 
         try:
             position = api.get_position(ticker)
@@ -202,20 +218,20 @@ def run_hybrid_strategy(tickers, quantity, lstm_model_dict, xgb_model_dict, scal
             side = None
 
         if side == 'short' and decision == 1:
-            limit_price = round(current_price * 1.001, 2)
+            limit_price = round(current_price * 1.0025, 2)
             place_limit_order(ticker, abs(current_qty), 'buy', limit_price)
             return
 
         if side == 'long' and decision == 0:
-            limit_price = round(current_price * 0.999, 2)
+            limit_price = round(current_price * 0.9975, 2)
             place_limit_order(ticker, abs(current_qty), 'sell', limit_price)
             return
 
         if decision == 1:
-            limit_price = round(current_price * 1.001, 2)
+            limit_price = round(current_price * 1.0025, 2)
             place_limit_order(ticker, quantity, 'buy', limit_price)
         elif decision == 0:
-            limit_price = round(current_price * 0.999, 2)
+            limit_price = round(current_price * 0.9975, 2)
             place_limit_order(ticker, quantity, 'sell', limit_price)
 
     while True:
@@ -231,12 +247,17 @@ def run_hybrid_strategy(tickers, quantity, lstm_model_dict, xgb_model_dict, scal
                     scaler_dict[ticker] = scaler
 
         account = api.get_account()
-        print(f"Portfolio Value: {account.portfolio_value}")
-        time.sleep(60)
+        portfolio_value = account.portfolio_value
+        total_pnl = calculate_total_pnl()
+
+        print(f"Portfolio Value: {portfolio_value} | Total PnL of Open Positions: {total_pnl:.2f}")
+
+        time.sleep(360)
         iteration_count += 1
 
+
 # Main execution
-tickers = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"]
+tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
 lstm_model_dict = {}
 xgb_model_dict = {}
 scaler_dict = {}
@@ -249,4 +270,5 @@ for ticker in tickers:
         scaler_dict[ticker] = scaler
 
 # Run the hybrid strategy with retraining every hour (3600 seconds)
-run_hybrid_strategy(tickers, 1, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=60)
+run_hybrid_strategy(tickers, 5, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=3602)
+
