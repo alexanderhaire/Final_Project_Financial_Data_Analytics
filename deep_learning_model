@@ -270,5 +270,5 @@ for ticker in tickers:
         scaler_dict[ticker] = scaler
 
 # Run the hybrid strategy with retraining every hour (3600 seconds)
-run_hybrid_strategy(tickers, 5, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=3602)
+run_hybrid_strategy(tickers, 5, lstm_model_dict, xgb_model_dict, scaler_dict, retrain_interval=3600)
 
